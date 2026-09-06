@@ -1,9 +1,9 @@
 ---
-oneliner: Python bindings for quad mesh quantization, turning a UV parameterization into an integer-grid-aligned one for quad extraction
-tags: [mesh-processing, geometry-processing, quad-mesh, quantization, uv-parameterization, pybind11, python, cpp, research-paper]
+oneliner: Python bindings for quad mesh quantization: snaps a seamless UV map to the integer grid for quad extraction
+tags: [mesh-processing, quad-mesh, quantization, uv-parameterization, integer-grid, pybind11, cpp, python, torus, research-paper]
 stack: [C++, pybind11, scikit-build-core, Python]
 generated: 2026-09-06
-commit: b3e7750
-placeholder: true
+commit: d5761dc
+placeholder: false
 ---
-Wraps the C++ reference implementation of "Quad Mesh Quantization Without a T-Mesh" (Coudert-Osmont et al., 2024) as a pip-installable Python package. Takes a seamless UV parameterization on a triangle mesh and produces a quantized, integer-grid-aligned one, with reembed/imprint/decimate output modes. Working alpha with a 21-test pytest suite covering all three modes.
+Wraps the C++ reference implementation of "Quad Mesh Quantization Without a T-Mesh" (Coudert-Osmont et al., 2024) as a pip-installable Python package. Takes a seamless UV parameterization on a triangle mesh and produces a quantized, integer-grid-aligned one, with reembed/imprint/decimate output modes. Working alpha with a 21-test pytest suite; decimate is the robust mode, while reembed sometimes diverges to NaN and imprint can crash on degenerate synthetic input.
