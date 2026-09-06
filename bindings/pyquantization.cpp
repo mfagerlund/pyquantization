@@ -125,11 +125,17 @@ static py::tuple mesh_to_arrays(const Mesh &m, const std::vector<vec2> &uv, cons
         }
     }
 
-    // Feature edges
+    // Feature edges.
+    // Only meshes that carry a per-corner feature flag AND computed adjacency can
+    // report feature edges. The imprinted mesh has neither (transfert_coarse_to_fine
+    // builds it corner-soup style and never calls compute_opp), and indexing an
+    // empty std::vector<bool> / adjacency array here is what used to segfault.
     std::vector<std::pair<int,int>> feat_list;
-    for (int h = 0; h < n_corners; ++h) {
-        if (feature[h] && m.opp(h) < h) {
-            feat_list.emplace_back(m.from(h), m.to(h));
+    if ((int)feature.size() == n_corners) {
+        for (int h = 0; h < n_corners; ++h) {
+            if (feature[h] && m.opp(h) < h) {
+                feat_list.emplace_back(m.from(h), m.to(h));
+            }
         }
     }
     py::array_t<int32_t> out_feats({(int)feat_list.size(), 2});
@@ -222,7 +228,37 @@ static py::tuple quantize_mesh(
     case OutputMode::IMPRINT: {
         std::cerr << "IMPRINTING..." << std::endl;
         const auto [fineQ, uvQ] = transfert_coarse_to_fine(fine, f_uv, m, seamless, quv);
-        std::vector<bool> no_feature;
+
+        // transfert_coarse_to_fine reports per-facet failures on stderr and just
+        // skips them, so a total failure shows up only as an empty or inconsistent
+        // mesh. Say so instead of handing back a degenerate result.
+        if (fineQ.nfacets() == 0 || fineQ.nverts() == 0) {
+            throw std::invalid_argument(
+                "Imprinting failed: no coarse facet could be imprinted onto the input mesh. "
+                "Imprint needs the decimated mesh to overlap the fine mesh in UV space; "
+                "this typically fails on flat/degenerate inputs where decimation collapses "
+                "the mesh to a couple of facets. Use mode='reembed' or mode='decimate' instead."
+            );
+        }
+        if ((int)uvQ.size() != fineQ.ncorners()) {
+            throw std::runtime_error(
+                "Imprinting produced an inconsistent mesh (" + std::to_string(uvQ.size())
+                + " UVs for " + std::to_string(fineQ.ncorners()) + " corners)."
+            );
+        }
+        for (int h = 0; h < fineQ.ncorners(); ++h) {
+            const int v = fineQ.h2v[h];
+            if (v < 0 || v >= fineQ.nverts()) {
+                throw std::runtime_error(
+                    "Imprinting produced an out-of-range vertex index (" + std::to_string(v)
+                    + " of " + std::to_string(fineQ.nverts()) + ") at corner " + std::to_string(h) + "."
+                );
+            }
+        }
+
+        // The imprinted mesh carries no feature flags and no half-edge adjacency,
+        // so no feature edges are reported for this mode.
+        const std::vector<bool> no_feature;
         return mesh_to_arrays(fineQ, uvQ, no_feature);
     }
 

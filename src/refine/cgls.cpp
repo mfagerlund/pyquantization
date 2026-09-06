@@ -9,6 +9,8 @@
 #include <condition_variable>
 #include <iomanip>
 #include <mutex>
+#include <stdexcept>
+#include <string>
 #include <thread>
 
 #include "vectorize.h"
@@ -141,15 +143,24 @@ void solve(const LinearSystem &LS, vector<double> &x0, std::ostream* out_stream)
 	double *d = aligned_new_array<double>(v4d::ALI, n2);
 	double *h = aligned_new_array<double>(v4d::ALI, n2);
 	if(x != x0.data()) copy_n(x0.begin(), n, x);
-	for(int i = n; i < n2; ++i) r[i] = h[i] = 0.;
+	// The SIMD kernels below run over the padded range [n, n2). Leaving x and d
+	// uninitialized there is undefined behaviour and lets stale stack/heap bytes
+	// (possibly inf/NaN) into the arithmetic, so zero the whole padding.
+	for(int i = n; i < n2; ++i) r[i] = h[i] = d[i] = 0.;
+	for(int i = n; i < n2; ++i) x[i] = 0.;
     double curr_err = 0., alpha, beta;
 	int k = 0;
 
-	const int NT = thread::hardware_concurrency();
+	const int NT = max(1u, thread::hardware_concurrency());
 	int num_working = NT;
 	int step = 0;
-	mutex redution_mutex, working_mutex;
+	mutex working_mutex;
 	condition_variable start_cv;
+	// Per-thread reduction slots. Summing these in a fixed thread order inside the
+	// barrier makes the result bit-identical run to run; accumulating into a shared
+	// double under a mutex does not, because floating point addition is not
+	// associative and the lock acquisition order varies.
+	vector<double> partial(NT, 0.);
 
 	const auto synchrof = [&](int &local_step, const auto f) {
 		bool last = false;
@@ -168,8 +179,6 @@ void solve(const LinearSystem &LS, vector<double> &x0, std::ostream* out_stream)
 		unique_lock lock(working_mutex);
 		start_cv.wait(lock, [&](){ return step == local_step; });
 	};
-	const auto synchro = [&](int &local_step) { synchrof(local_step, [](){}); };
-
 	const auto work = [&](const int t) {
 		const auto [Mcoeff, Min, off, b] = LS.Mb();
 		const int R0 = t == 0 ? 0 : lower_bound(off, off+n+1, (t*(LS.MSize()+3*n))/NT, [off=off](const int &a, const int b) { return a + 3*(&a-off) < b; }) - off;
@@ -179,7 +188,14 @@ void solve(const LinearSystem &LS, vector<double> &x0, std::ostream* out_stream)
 		double local_sum = 0.;
 		int local_step = 0;
 		const auto initReduct = [&]() { local_sum = 0.; };
-		const auto reduct = [&](double &x) { redution_mutex.lock(); x += local_sum; redution_mutex.unlock(); };
+		// Publish this thread's partial sum into its own slot; the barrier callback
+		// then folds them together in ascending thread order (deterministic).
+		const auto reduct = [&]() { partial[t] = local_sum; };
+		const auto foldPartials = [&]() {
+			double s = 0.;
+			for(int i = 0; i < NT; ++i) s += partial[i];
+			return s;
+		};
 
 		initReduct();
 		for(int i = R0, j = off[i]; i < R1; ++i) {
@@ -190,14 +206,13 @@ void solve(const LinearSystem &LS, vector<double> &x0, std::ostream* out_stream)
 			r[i] = d[i] = stmp;
 			local_sum += stmp*stmp;
 		}
-		reduct(curr_err);
-		synchro(local_step);
+		reduct();
+		synchrof(local_step, [&]() { curr_err = foldPartials(); });
 		if(curr_err < LS.threshold()) goto xTimesP;
 
 		while(k < n) {
 			synchrof(local_step, [&]() {
 				if(out_stream && (k%100) == 0) *out_stream << setw(4) << k << " : " << curr_err << " -- " << LS.threshold() << '\n';
-				alpha = 0.;
 				++ k;
 			});
 
@@ -210,11 +225,10 @@ void solve(const LinearSystem &LS, vector<double> &x0, std::ostream* out_stream)
 				h[i] = stmp;
 				local_sum += d[i]*stmp;
 			}
-			reduct(alpha);
+			reduct();
 			synchrof(local_step, [&]() {
-				alpha = curr_err / alpha;
+				alpha = curr_err / foldPartials();
 				beta = 1. / curr_err;
-				curr_err = 0.;
 			});
 
 			const v4d A4(alpha);
@@ -225,9 +239,10 @@ void solve(const LinearSystem &LS, vector<double> &x0, std::ostream* out_stream)
 				tmp.store(&r[i], true);
 				E4 = fma(tmp, tmp, E4);
 			}
-			redution_mutex.lock(); curr_err += E4.sum(); redution_mutex.unlock();			
-			synchro(local_step);
+			partial[t] = E4.sum();
+			synchrof(local_step, [&]() { curr_err = foldPartials(); });
 			if(curr_err < LS.threshold()) break;
+			if(!std::isfinite(curr_err)) break;
 			const v4d B4(beta * curr_err);
 			for(int i = B0; i < B1; i += 4)
 				fma(B4, v4d(&d[i], true), v4d(&r[i], true)).store(&d[i], true);
@@ -242,6 +257,29 @@ void solve(const LinearSystem &LS, vector<double> &x0, std::ostream* out_stream)
 	work(0);
 	for(int i = 1; i < NT; ++i) threads[i-1].join();
 	LS.postProcess(x0);
+
+	// A conjugate gradient run that produced a non-finite residual or iterate has
+	// diverged (singular / badly conditioned system). Report it instead of handing
+	// back NaNs that silently poison everything downstream.
+	if(!std::isfinite(curr_err)) {
+		if(x != x0.data()) aligned_delete_array(x);
+		aligned_delete_array(r);
+		aligned_delete_array(d);
+		aligned_delete_array(h);
+		throw std::runtime_error(
+			"Linear solve diverged: the residual became non-finite after "
+			+ std::to_string(k) + " conjugate gradient iterations. "
+			"The system is singular or badly conditioned - check the input parameterization.");
+	}
+	for(int i = 0; i < n; ++i) if(!std::isfinite(x0[i])) {
+		if(x != x0.data()) aligned_delete_array(x);
+		aligned_delete_array(r);
+		aligned_delete_array(d);
+		aligned_delete_array(h);
+		throw std::runtime_error(
+			"Linear solve produced a non-finite solution (variable " + std::to_string(i)
+			+ "). The system is singular or badly conditioned - check the input parameterization.");
+	}
 
 	if(x != x0.data()) aligned_delete_array(x);
 	aligned_delete_array(r);

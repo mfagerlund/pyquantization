@@ -7,6 +7,9 @@
 #include "cgls.h"
 
 #include <array>
+#include <cmath>
+#include <stdexcept>
+#include <string>
 
 using namespace std;
 
@@ -227,6 +230,10 @@ void ES2(const Mesh &m, const vector<vec2> &U, const ReductionMatrix &M, vector<
 			const mat2 dJ = (area / khi) * (2.*J + (2.*C*detJ - F_num / eabs_detJ) * J.com());
 			for(const int i : Range(4)) for(const auto &[ind, a] : Jreduc[f][i]) if(ind != ReductionMatrix::ONE) g[ind] += a * dJ(i>>1,i&1);
 		}
+		if(!std::isfinite(F)) throw std::runtime_error(
+			"Re-embedding diverged: the distortion energy became non-finite at iteration "
+			+ std::to_string(step) + ". The input parameterization is degenerate or the "
+			"quantization produced an unembeddable target.");
 		// LBFGS
 		dx.assign(g.begin(), g.end());
 		if(step) {
@@ -242,6 +249,22 @@ void ES2(const Mesh &m, const vector<vec2> &U, const ReductionMatrix &M, vector<
 				ss += s0[i]*s0[i]/diag[i];
 				yy += y0[i]*y0[i]*diag[i];
 				ys += s0[i]*y0[i];
+			}
+			// L-BFGS curvature condition. Once the iterate stops moving (s == 0 and
+			// y == 0, which happens as soon as the line search can no longer make
+			// progress) ys, ss and yy all collapse to zero. Then rho = 1/ys and the
+			// diagonal rescaling below both divide by zero, dx becomes NaN, and the
+			// line search test `getF() > ...` compares NaN, which is false - so the
+			// NaN iterate is accepted silently and every subsequent step, and the
+			// returned UVs, are NaN. Treat the breakdown as the stall it is.
+			if(!(ys > 0.) || !(ss > 0.) || !(yy > 0.)
+					|| !std::isfinite(ys) || !std::isfinite(ss) || !std::isfinite(yy)) {
+				if(minDet > 0.) break; // stalled on a valid, non-inverted embedding: done
+				throw std::runtime_error(
+					"Re-embedding failed to converge: the optimizer stalled after "
+					+ std::to_string(step) + " iterations with a degenerate embedding "
+					"(minimum Jacobian determinant " + std::to_string(minDet) + " <= 0). "
+					"The quantized parameterization could not be embedded on the input mesh.");
 			}
 			rho[k0] = 1. / ys;
 			for(int k = 0; k < K; ++k) {
@@ -278,9 +301,22 @@ void ES2(const Mesh &m, const vector<vec2> &U, const ReductionMatrix &M, vector<
 			x[i] -= dx[i];
 			gdx += g[i]*dx[i];
 		}
-		while(t > 1e-10 && getF() > F - alpha * t * gdx) {
+		// Note the negated form: a non-finite trial energy makes `<=` false, so the
+		// line search keeps backtracking instead of accepting the bad step (with
+		// `getF() > ...` a NaN compares false and the step is taken silently).
+		while(t > 1e-10 && !(getF() <= F - alpha * t * gdx)) {
 			t *= beta;
 			for(const int i : Range(x.size())) x[i] = x0[i] - t*dx[i];
+		}
+		// Backtracking could not escape a non-finite region: undo the step rather
+		// than carrying NaNs forward.
+		if(!std::isfinite(getF())) {
+			x.assign(x0.begin(), x0.end());
+			if(minDet > 0.) break;
+			throw std::runtime_error(
+				"Re-embedding diverged: the line search could not find a finite step at "
+				"iteration " + std::to_string(step) + " and the embedding is still degenerate "
+				"(minimum Jacobian determinant " + std::to_string(minDet) + " <= 0).");
 		}
 		if((step%10)==0 || step==1999 || (minDet > 0. && eps2 < 1e-15 && gdx/F < delta)) cerr << step << ": " << minDet << ' ' << sqrt(eps2) << ' ' << F << ' ' << gdx/F << ' ' << t << endl;
 		// cerr << step << ": " << minDet << ' ' << sqrt(eps2) << ' ' << F << ' ' << gdx/F << ' ' << t << endl;
@@ -397,6 +433,10 @@ vector<vec2> reembed(const Mesh &m, const vector<vec2> &uv, const CutGraph &cg, 
 		for(const auto &[i, a] : M.getRow(2*h+d))
 			if(i == ReductionMatrix::ONE) u += a;
 			else u += a*x[i];
+		if(!std::isfinite(u)) throw std::runtime_error(
+			"Re-embedding produced a non-finite UV coordinate at corner "
+			+ std::to_string(h) + ". The re-embedding solve did not converge to a "
+			"valid parameterization.");
 		U[h][d] = u;
 	}
 
