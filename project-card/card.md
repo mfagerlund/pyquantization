@@ -6,4 +6,4 @@ generated: 2026-09-06
 commit: d5761dc
 placeholder: false
 ---
-Wraps the C++ reference implementation of "Quad Mesh Quantization Without a T-Mesh" (Coudert-Osmont et al., 2024) as a pip-installable Python package. Takes a seamless UV parameterization on a triangle mesh and produces a quantized, integer-grid-aligned one, with reembed/imprint/decimate output modes. Working alpha with a 21-test pytest suite; decimate is the robust mode, while reembed sometimes diverges to NaN and imprint can crash on degenerate synthetic input.
+Wraps the C++ reference implementation of "Quad Mesh Quantization Without a T-Mesh" (Coudert-Osmont et al., 2024) as a pip-installable Python package. Takes a seamless UV parameterization on a triangle mesh and produces a quantized, integer-grid-aligned one, with reembed/imprint/decimate output modes. Working alpha with a 43-test pytest suite covering all three modes on golden torus and sphere inputs plus synthetic grids; results are deterministic and a failed solve raises instead of returning NaN.
