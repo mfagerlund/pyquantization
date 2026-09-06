@@ -1,5 +1,5 @@
 ---
-oneliner: Python bindings for quad mesh quantization: snaps a seamless UV map to the integer grid for quad extraction
+oneliner: "Python bindings for quad mesh quantization: snaps a seamless UV map to the integer grid for quad extraction"
 tags: [mesh-processing, quad-mesh, quantization, uv-parameterization, integer-grid, pybind11, cpp, python, torus, research-paper]
 stack: [C++, pybind11, scikit-build-core, Python]
 generated: 2026-09-06
